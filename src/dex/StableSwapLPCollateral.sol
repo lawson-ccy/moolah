@@ -41,9 +41,8 @@ contract StableSwapLPCollateral is ERC20Upgradeable {
 
   /// @dev only Moolah can transfer
   function transfer(address to, uint256 value) public override onlyMoolah returns (bool) {
-    return transfer(to, value);
-    //    address owner = _msgSender();
-    //    _transfer(owner, to, value);
-    //    return true;
+    address owner = _msgSender();
+    _transfer(owner, to, value);
+    return true;
   }
 }
