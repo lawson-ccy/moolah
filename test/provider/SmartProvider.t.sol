@@ -339,4 +339,84 @@ contract SmartProviderTest is Test {
     assertApproxEqAbs(token0.balanceOf(bot), amounts[0], 2); // allow 2 wei difference due to rounding
     assertApproxEqAbs(bot.balance - bnbReceive, amounts[1], 2); // allow 2 wei difference due to rounding
   }
+
+  function test_repay_usdt() public {
+    test_borrow_usdt();
+
+    skip(10 days);
+
+    vm.startPrank(user2);
+    moolah.accrueInterest(marketParams);
+    (, uint128 user2Debt, ) = moolah.position(marketParams.id(), user2);
+    uint256 repayAmount = 100 ether;
+    (, , uint128 totalBorrowAssets, uint128 totalBorrowShares, , ) = moolah.market(marketParams.id());
+    uint256 repayShares = repayAmount.toSharesUp(totalBorrowAssets, totalBorrowShares);
+
+    deal(USDT, user2, repayAmount);
+    IERC20(USDT).approve(address(moolah), repayAmount);
+    moolah.repay(marketParams, repayAmount, 0, user2, bytes(""));
+    (, uint256 user2DebtAfter, ) = moolah.position(marketParams.id(), user2);
+    (, , uint128 totalBorrowAssetsAfter, uint128 totalBorrowSharesAfter, , ) = moolah.market(marketParams.id());
+
+    assertApproxEqAbs(user2DebtAfter, user2Debt - repayShares, 2); // allow 2 wei difference due to rounding
+    assertEq(totalBorrowAssetsAfter, totalBorrowAssets - repayAmount);
+    assertApproxEqAbs(totalBorrowSharesAfter, totalBorrowShares - repayShares, 2); // allow 2 wei difference due to rounding
+  }
+
+  function test_repayAll_usdt() public {
+    test_borrow_usdt();
+
+    skip(10 days);
+
+    vm.startPrank(user2);
+    moolah.accrueInterest(marketParams);
+    (, uint128 user2Debt, ) = moolah.position(marketParams.id(), user2);
+
+    deal(USDT, user2, user2Debt / 1e6 + 1 ether);
+    IERC20(USDT).approve(address(moolah), user2Debt / 1e6 + 1 ether);
+    moolah.repay(marketParams, 0, user2Debt, user2, bytes(""));
+    (, uint256 user2DebtAfter, ) = moolah.position(marketParams.id(), user2);
+    (, , uint128 totalBorrowAssetsAfter, uint128 totalBorrowSharesAfter, , ) = moolah.market(marketParams.id());
+
+    assertEq(user2DebtAfter, 0);
+    assertEq(totalBorrowAssetsAfter, 0);
+    assertEq(totalBorrowSharesAfter, 0);
+  }
+
+  function test_withdrawCollateral_perfect() public {
+    test_repayAll_usdt();
+
+    vm.startPrank(user2);
+    (, , uint256 user2Collateral) = moolah.position(marketParams.id(), user2);
+    uint256 withdrawAmount = user2Collateral / 2;
+    uint256[2] memory amounts = dexInfo.calc_coins_amount(address(dex), withdrawAmount);
+    uint256 minAmount0 = (amounts[0] * 99) / 100; // slippage 1%
+    uint256 minAmount1 = (amounts[1] * 99) / 100; // slippage 1%
+
+    uint256 token0Balance = token0.balanceOf(user2);
+    uint256 bnbBalance = user2.balance;
+    uint256 totalSupplyBefore = lp.totalSupply();
+    vm.expectRevert("unauthorized");
+    smartProvider.withdrawCollateral(marketParams, withdrawAmount, minAmount0, minAmount1, user2, payable(user2));
+    vm.stopPrank();
+    vm.prank(manager);
+    moolah.addProvider(marketParams.id(), address(smartProvider));
+    assertEq(moolah.providers(marketParams.id(), address(lpCollateral)), address(smartProvider));
+
+    vm.prank(user2);
+    smartProvider.withdrawCollateral(marketParams, withdrawAmount, minAmount0, minAmount1, user2, payable(user2));
+    (, , uint256 user2CollateralAfter) = moolah.position(marketParams.id(), user2);
+
+    assertEq(user2CollateralAfter, user2Collateral - withdrawAmount);
+    assertEq(lpCollateral.balanceOf(address(moolah)), user2CollateralAfter);
+    assertEq(lpCollateral.totalSupply(), user2CollateralAfter);
+
+    assertEq(lp.balanceOf(address(smartProvider)), user2CollateralAfter);
+    assertEq(lp.totalSupply(), totalSupplyBefore - withdrawAmount);
+
+    uint256 token0Received = token0.balanceOf(user2) - token0Balance;
+    uint256 bnbReceived = user2.balance - bnbBalance;
+    assertApproxEqAbs(token0Received, amounts[0], 2); // allow 2 wei difference due to rounding
+    assertApproxEqAbs(bnbReceived, amounts[1], 2); // allow 2 wei difference due to rounding
+  }
 }

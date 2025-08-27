@@ -36,6 +36,42 @@ contract StableSwapPoolInfo {
     }
   }
 
+  /**
+   * @notice Given an amount of currency i, calculate the amount of currency j that would be added without moving the price
+   * @param _swap Address of the swap
+   * @param i Index value of the input currency
+   * @param amount_i Amount of currency i to convert
+   */
+  function calc_amount_i_perfect(address _swap, uint256 i, uint256 amount_i) external view returns (uint256 amount_j) {
+    uint256[N_COINS] memory balances = balances(_swap);
+
+    uint256 balance_i = balances[i];
+
+    amount_j = (amount_i * balances[(i + 1) % N_COINS]) / balance_i;
+  }
+
+  /**
+   * @notice Calculate the slippage of adding liquidity to the pool
+   * @param _swap Address of the swap
+   * @param amounts Amounts of each currency to add
+   */
+  function calc_add_liquidity_slippage(address _swap, uint256[N_COINS] memory amounts) external view returns (int256) {
+    uint256 mint_amount = get_add_liquidity_mint_amount(_swap, amounts);
+
+    uint256 totalSupply = token(_swap).totalSupply();
+    if (totalSupply == 0) {
+      return 0;
+    }
+    uint256[N_COINS] memory old_balances = balances(_swap);
+    uint256[N_COINS] memory xp = _xp_mem(_swap, old_balances);
+
+    uint256 x = (totalSupply * amounts[0]) / xp[0];
+    uint256 y = (totalSupply * amounts[1]) / xp[1];
+    uint256 lp_ideal = x > y ? y : x; // smaller one
+
+    return int256(mint_amount) / int256(lp_ideal) - int256(1e18);
+  }
+
   function RATES(address _swap) public view returns (uint256[N_COINS] memory swapRATES) {
     for (uint256 i = 0; i < N_COINS; i++) {
       swapRATES[i] = IStableSwap(_swap).RATES(i);
@@ -63,10 +99,7 @@ contract StableSwapPoolInfo {
     return get_D(_xp_mem(_swap, _balances), amp);
   }
 
-  function get_add_liquidity_mint_amount(
-    address _swap,
-    uint256[N_COINS] memory amounts
-  ) external view returns (uint256) {
+  function get_add_liquidity_mint_amount(address _swap, uint256[N_COINS] memory amounts) public view returns (uint256) {
     IStableSwap swap = IStableSwap(_swap);
     uint256[N_COINS] memory fees;
     uint256 _fee = (swap.fee() * N_COINS) / (4 * (N_COINS - 1));
