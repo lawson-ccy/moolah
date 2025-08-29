@@ -49,16 +49,13 @@ contract StableSwapPool is
   uint256 public future_fee;
   uint256 public future_admin_fee;
 
-  uint256 public kill_deadline;
-  uint256 public constant KILL_DEADLINE_DT = 2 * 30 days; // Pools can only be killed within the first 60 days after deployment
-  bool public is_killed;
-
   address public oracle; // resilient oracle
   uint256 public price0DiffThreshold;
   uint256 public price1DiffThreshold;
 
   address public immutable STABLESWAP_FACTORY;
   bytes32 public constant MANAGER = keccak256("MANAGER");
+  bytes32 public constant PAUSER = keccak256("PAUSER");
 
   /* CONSTRUCTOR */
 
@@ -75,6 +72,8 @@ contract StableSwapPool is
    * @param _fee: Fee to charge for exchanges
    * @param _admin_fee: Admin fee
    * @param _owner: Owner
+   * @param _manager: Manager
+   * @param _pauser: Pauser
    * @param _LP: LP address
    */
   function initialize(
@@ -84,6 +83,7 @@ contract StableSwapPool is
     uint256 _admin_fee,
     address _owner,
     address _manager,
+    address _pauser,
     address _LP,
     address _oracle
   ) public initializer {
@@ -93,6 +93,7 @@ contract StableSwapPool is
     require(_admin_fee <= MAX_ADMIN_FEE, "_admin_fee exceeds maximum");
     require(_owner != address(0), "ZERO Address");
     require(_manager != address(0), "ZERO Address");
+    require(_pauser != address(0), "ZERO Address");
     require(_LP != address(0), "ZERO Address");
     require(_coins.length == N_COINS, "Invalid number of coins");
     require(_oracle != address(0), "ZERO Address for oracle");
@@ -116,7 +117,6 @@ contract StableSwapPool is
     future_A = _A;
     fee = _fee;
     admin_fee = _admin_fee;
-    kill_deadline = block.timestamp + KILL_DEADLINE_DT;
     token = _LP;
 
     oracle = _oracle;
@@ -127,6 +127,7 @@ contract StableSwapPool is
 
     _grantRole(DEFAULT_ADMIN_ROLE, _owner);
     _grantRole(MANAGER, _manager);
+    _grantRole(PAUSER, _pauser);
   }
 
   function get_A() internal view returns (uint256) {
@@ -245,9 +246,11 @@ contract StableSwapPool is
     return (difference * token_amount) / D0;
   }
 
-  function add_liquidity(uint256[N_COINS] memory amounts, uint256 min_mint_amount) external payable nonReentrant {
+  function add_liquidity(
+    uint256[N_COINS] memory amounts,
+    uint256 min_mint_amount
+  ) external payable whenNotPaused nonReentrant {
     //Amounts is amounts of c-tokens
-    require(!is_killed, "Killed");
     if (!support_BNB) {
       require(msg.value == 0, "Inconsistent quantity"); // Avoid sending BNB by mistake.
     }
@@ -385,16 +388,16 @@ contract StableSwapPool is
 
   function checkPriceDiff() public view {
     // Calculate pool prices for both coins
-    uint256 deltaAmount = 1e18;
-    uint256 token1Amount = get_dy(0, 1, deltaAmount); // sell 1 ether token0
-    uint256 token0Amount = get_dy(1, 0, deltaAmount); // sell 1 ether token1
+    uint256 dx = 1e12; // use tiny dx to get spot price; TODO consider decimal differences
+    uint256 token1Amount = get_dy(0, 1, dx); // sell 1 ether token0
+    uint256 token0Amount = get_dy(1, 0, dx); // sell 1 ether token1
 
     // Get oracle prices for both coins
     uint256 oraclePrice0 = getOraclePrice(coins[0]);
     uint256 oraclePrice1 = getOraclePrice(coins[1]);
 
-    uint256 poolPrice1 = (deltaAmount * oraclePrice0) / token1Amount;
-    uint256 poolPrice0 = (deltaAmount * oraclePrice1) / token0Amount;
+    uint256 poolPrice1 = (dx * oraclePrice0) / token1Amount;
+    uint256 poolPrice0 = (dx * oraclePrice1) / token0Amount;
 
     console.log("token1Amount:", token1Amount);
     console.log("token0Amount:", token0Amount);
@@ -430,8 +433,7 @@ contract StableSwapPool is
 
   /// @dev token0 -> token1: i = 0, j = 1
   /// @dev token1 -> token0: i = 1, j = 0
-  function exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy) external payable nonReentrant {
-    require(!is_killed, "Killed");
+  function exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy) external payable whenNotPaused nonReentrant {
     if (!support_BNB) {
       require(msg.value == 0, "Inconsistent quantity"); // Avoid sending BNB by mistake.
     }
@@ -491,9 +493,10 @@ contract StableSwapPool is
     emit RemoveLiquidity(msg.sender, amounts, fees, total_supply - _amount);
   }
 
-  function remove_liquidity_imbalance(uint256[N_COINS] memory amounts, uint256 max_burn_amount) external nonReentrant {
-    require(!is_killed, "Killed");
-
+  function remove_liquidity_imbalance(
+    uint256[N_COINS] memory amounts,
+    uint256 max_burn_amount
+  ) external whenNotPaused nonReentrant {
     uint256 token_supply = IStableSwapLP(token).totalSupply();
     require(token_supply > 0, "dev: zero total supply");
     uint256 _fee = (fee * N_COINS) / (4 * (N_COINS - 1));
@@ -526,6 +529,8 @@ contract StableSwapPool is
     require(token_amount > 0, "token_amount must be greater than 0");
     token_amount += 1; // In case of rounding errors - make it unfavorable for the "attacker"
     require(token_amount <= max_burn_amount, "Slippage screwed you");
+
+    checkPriceDiff(); // Check price diff before burning LP tokens
 
     IStableSwapLP(token).burnFrom(msg.sender, token_amount); // dev: insufficient funds
 
@@ -624,16 +629,23 @@ contract StableSwapPool is
     return dy;
   }
 
-  function remove_liquidity_one_coin(uint256 _token_amount, uint256 i, uint256 min_amount) external nonReentrant {
+  function remove_liquidity_one_coin(
+    uint256 _token_amount,
+    uint256 i,
+    uint256 min_amount
+  ) external whenNotPaused nonReentrant {
     // Remove _amount of liquidity all in a form of coin i
-    require(!is_killed, "Killed");
     (uint256 dy, uint256 dy_fee) = _calc_withdraw_one_coin(_token_amount, i);
     require(dy >= min_amount, "Not enough coins removed");
 
     balances[i] -= (dy + (dy_fee * admin_fee) / FEE_DENOMINATOR);
+
+    checkPriceDiff(); // Check price diff before burning LP tokens
+
     IStableSwapLP(token).burnFrom(msg.sender, _token_amount); // dev: insufficient funds
     transfer_out(coins[i], dy);
 
+    // TODO: log fee also?
     emit RemoveLiquidityOne(msg.sender, i, _token_amount, dy);
   }
 
@@ -746,6 +758,7 @@ contract StableSwapPool is
     }
   }
 
+  /// @dev donate admin fees as pool reserves
   function donate_admin_fees() external onlyRole(MANAGER) {
     for (uint256 i = 0; i < N_COINS; i++) {
       if (coins[i] == BNB_ADDRESS) {
@@ -757,15 +770,14 @@ contract StableSwapPool is
     emit DonateAdminFees();
   }
 
-  function kill_me() external onlyRole(MANAGER) {
-    require(kill_deadline > block.timestamp, "Exceeded deadline");
-    is_killed = true;
-    emit Kill();
+  /// @dev Pause the contract. Only `remove_liquidity` is allowed.
+  function pause() external onlyRole(PAUSER) {
+    _pause();
   }
 
-  function unkill_me() external onlyRole(MANAGER) {
-    is_killed = false;
-    emit Unkill();
+  /// @dev Resume the contract.
+  function unpause() external onlyRole(MANAGER) {
+    _unpause();
   }
 
   function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}

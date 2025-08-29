@@ -91,8 +91,6 @@ interface IStableSwap {
   event SetBNBGas(uint256 bnb_gas);
   event RevertParameters();
   event DonateAdminFees();
-  event Kill();
-  event Unkill();
 }
 
 interface IStableSwapPoolInfo {

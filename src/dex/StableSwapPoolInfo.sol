@@ -440,9 +440,10 @@ contract StableSwapPoolInfo {
     address _swap,
     uint256 _token_amount,
     uint256 i
-  ) external view returns (uint256 adminFee) {
+  ) external view returns (uint256 swapFee, uint256 adminFee) {
     IStableSwap swap = IStableSwap(_swap);
     (, uint256 dy_fee) = _calc_withdraw_one_coin(_swap, _token_amount, i);
+    swapFee = dy_fee;
     adminFee = (dy_fee * swap.admin_fee()) / FEE_DENOMINATOR;
   }
 

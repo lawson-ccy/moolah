@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import { StableSwapPool } from "../../src/dex/StableSwapPool.sol";
 import { StableSwapLP } from "../../src/dex/StableSwapLP.sol";
+import { StableSwapPoolInfo } from "../../src/dex/StableSwapPoolInfo.sol";
 import { ERC20Mock } from "../../src/moolah/mocks/ERC20Mock.sol";
 import { IOracle } from "../../src/moolah/interfaces/IOracle.sol";
 
@@ -14,6 +15,7 @@ contract StableSwapPoolBNBTest is Test {
   address constant BNB_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
   StableSwapPool pool;
+  StableSwapPoolInfo poolInfo;
 
   StableSwapLP lp; // ss-lp
 
@@ -22,6 +24,7 @@ contract StableSwapPoolBNBTest is Test {
 
   address admin = makeAddr("admin");
   address manager = makeAddr("manager");
+  address pauser = makeAddr("pauser");
   address oracle = makeAddr("oracle");
 
   address userA = makeAddr("userA");
@@ -29,6 +32,8 @@ contract StableSwapPoolBNBTest is Test {
   address userC = makeAddr("userC");
 
   function setUp() public {
+    poolInfo = new StableSwapPoolInfo();
+
     // Deploy LP token
     StableSwapLP lpImpl = new StableSwapLP();
     ERC1967Proxy lpProxy = new ERC1967Proxy(address(lpImpl), abi.encodeWithSelector(lpImpl.initialize.selector));
@@ -58,7 +63,18 @@ contract StableSwapPoolBNBTest is Test {
     StableSwapPool impl = new StableSwapPool();
     ERC1967Proxy proxy = new ERC1967Proxy(
       address(impl),
-      abi.encodeWithSelector(impl.initialize.selector, tokens, _A, _fee, _adminFee, admin, manager, address(lp), oracle)
+      abi.encodeWithSelector(
+        impl.initialize.selector,
+        tokens,
+        _A,
+        _fee,
+        _adminFee,
+        admin,
+        manager,
+        pauser,
+        address(lp),
+        oracle
+      )
     );
 
     pool = StableSwapPool(address(proxy));
@@ -76,6 +92,10 @@ contract StableSwapPoolBNBTest is Test {
     assertEq(pool.oracle(), oracle);
     assertEq(pool.price0DiffThreshold(), 3e16); // 3% price diff threshold
     assertEq(pool.price1DiffThreshold(), 3e16); // 3% price diff threshold
+
+    assertTrue(pool.hasRole(pool.DEFAULT_ADMIN_ROLE(), admin));
+    assertTrue(pool.hasRole(pool.MANAGER(), manager));
+    assertTrue(pool.hasRole(pool.PAUSER(), pauser));
   }
 
   function test_seeding() public {
@@ -109,6 +129,9 @@ contract StableSwapPoolBNBTest is Test {
 
     uint256 amountOut = pool.get_dy(0, 1, amountIn); // expect token1 amount out
 
+    uint256 userBBalance0Before = token0.balanceOf(userB);
+    uint256 userBBalance1Before = userB.balance;
+
     vm.startPrank(userB);
     token0.approve(address(pool), 10000 ether);
 
@@ -118,6 +141,7 @@ contract StableSwapPoolBNBTest is Test {
 
     // Should succeed
     pool.exchange(0, 1, 100 ether, 0);
+    vm.stopPrank();
 
     // validate the price after swap
     uint256 oraclePrice0 = IOracle(oracle).peek(address(token0));
@@ -131,7 +155,146 @@ contract StableSwapPoolBNBTest is Test {
 
     assertGe(token0PriceAfter, (oraclePrice0 * 97) / 100); // 3% slippage tolerance
     assertLe(token0PriceAfter, (oraclePrice0 * 103) / 100); // 3% slippage tolerance
+    uint256 userBBalance0After = token0.balanceOf(userB);
+    uint256 userBBalance1After = userB.balance;
+    assertEq(userBBalance0After, userBBalance0Before - 100 ether);
+    assertGe(userBBalance1After, userBBalance1Before + amountOut);
+  }
 
-    console.log("User B swapped token0 to token1");
+  function test_remove_liquidity() public {
+    test_seeding();
+
+    vm.startPrank(userA);
+
+    // remove liquidity
+    uint256[2] memory min_amounts = poolInfo.calc_coins_amount(address(pool), 1 ether);
+    lp.approve(address(pool), 1 ether);
+
+    uint256 spotPrice0 = pool.get_dy(1, 0, 1e12); // token0 per token1; use tiny dx
+    uint256 spotPrice1 = pool.get_dy(0, 1, 1e12); // token1 per token0
+
+    uint256 userABalance0Before = token0.balanceOf(userA);
+    uint256 userABalance1Before = userA.balance;
+    uint256 token0ReserveBefore = pool.balances(0);
+    uint256 token1ReserveBefore = pool.balances(1);
+    uint256 totalSupply = lp.totalSupply();
+    pool.remove_liquidity(1 ether, min_amounts);
+    uint256 userABalance0After = token0.balanceOf(userA);
+    uint256 userABalance1After = userA.balance;
+
+    assertGe(userABalance0After, userABalance0Before + min_amounts[0]);
+    assertGe(userABalance1After, userABalance1Before + min_amounts[1]);
+
+    vm.stopPrank();
+    // check reserves decreased
+    assertEq(pool.balances(0), token0ReserveBefore - (userABalance0After - userABalance0Before));
+    assertEq(pool.balances(1), token1ReserveBefore - (userABalance1After - userABalance1Before));
+    assertEq(lp.totalSupply(), totalSupply - 1 ether);
+    // spot price should not move
+    uint256 spotPrice0After = pool.get_dy(1, 0, 1e12); // token0 per token1
+    uint256 spotPrice1After = pool.get_dy(0, 1, 1e12); // token1 per token0
+
+    assertApproxEqAbs(spotPrice0After, spotPrice0, 2); // allow 2 wei difference
+    assertApproxEqAbs(spotPrice1After, spotPrice1, 2); // allow 2 wei difference
+  }
+
+  function test_remove_liquidity_one_coin() public {
+    test_seeding();
+
+    vm.startPrank(userA);
+
+    // remove liquidity; recieving Bnb only
+
+    (uint256 swapFee, uint256 adminFee) = poolInfo.get_remove_liquidity_one_coin_fee(address(pool), 1 ether, 1); // withdraw token0
+    uint256 expectBnbAmt = pool.calc_withdraw_one_coin(1 ether, 1);
+
+    lp.approve(address(pool), 1 ether);
+    uint256 userABalance0Before = token0.balanceOf(userA);
+    uint256 userABalance1Before = userA.balance;
+    uint256 token0ReserveBefore = pool.balances(0);
+    uint256 token1ReserveBefore = pool.balances(1);
+    uint256 totalSupply = lp.totalSupply();
+
+    pool.remove_liquidity_one_coin(1 ether, 1, expectBnbAmt);
+    uint256 userABalance0After = token0.balanceOf(userA);
+    uint256 userABalance1After = userA.balance;
+    vm.stopPrank();
+
+    assertEq(userABalance0After, userABalance0Before);
+    assertEq(userABalance1After, userABalance1Before + expectBnbAmt);
+
+    // check fee and reserves
+    // TODO validate the fee amount
+    assertEq(pool.balances(0), token0ReserveBefore);
+    assertEq(pool.balances(1), token1ReserveBefore - expectBnbAmt - adminFee); // admin fee deducted from the pool
+    assertEq(lp.totalSupply(), totalSupply - 1 ether);
+  }
+
+  function test_remove_liquidity_imbalance() public {
+    test_seeding();
+
+    vm.startPrank(userA);
+
+    // remove liquidity imbalanced
+    uint256[2] memory amounts = [uint256(100 ether), uint256(50 ether)]; // withdraw 100 slisBnb and 50 Bnb
+
+    uint256[2] memory liquidityFee = poolInfo.get_remove_liquidity_imbalance_fee(address(pool), amounts);
+    uint256 maxBurnAmount = pool.calc_token_amount(amounts, false);
+
+    lp.approve(address(pool), maxBurnAmount);
+
+    uint256 userABalance0Before = token0.balanceOf(userA);
+    uint256 userABalance1Before = userA.balance;
+    uint256 token0ReserveBefore = pool.balances(0);
+    uint256 token1ReserveBefore = pool.balances(1);
+    uint256 totalSupply = lp.totalSupply();
+
+    pool.remove_liquidity_imbalance(amounts, maxBurnAmount);
+    uint256 userABalance0After = token0.balanceOf(userA);
+    uint256 userABalance1After = userA.balance;
+    vm.stopPrank();
+
+    assertEq(userABalance0After, userABalance0Before + amounts[0] - liquidityFee[0]);
+    assertEq(userABalance1After, userABalance1Before + amounts[1] - liquidityFee[1]);
+
+    // check fee and reserves
+    // TODO validate the fee amount
+    //    assertEq(pool.balances(0), token0ReserveBefore - 100 ether);
+    //    assertEq(pool.balances(1), token1ReserveBefore - adminFee); // admin fee deducted from the pool
+    assertEq(lp.totalSupply(), totalSupply - maxBurnAmount);
+  }
+
+  function test_paused() public {
+    test_seeding();
+
+    vm.prank(pauser);
+    pool.pause();
+    assertTrue(pool.paused());
+
+    vm.startPrank(userB);
+    token0.approve(address(pool), 10000 ether);
+
+    vm.expectRevert("EnforcedPause()");
+    pool.exchange(0, 1, 100 ether, 0);
+
+    deal(userB, 100 ether);
+
+    vm.expectRevert("EnforcedPause()");
+    uint256[2] memory amounts = [uint256(1 ether), uint256(1 ether)];
+    pool.add_liquidity{ value: 1 ether }(amounts, 0);
+
+    vm.expectRevert("EnforcedPause()");
+    pool.remove_liquidity_one_coin(1 ether, 0, 0);
+
+    vm.expectRevert("EnforcedPause()");
+    pool.remove_liquidity_imbalance(amounts, 0);
+    vm.stopPrank();
+
+    vm.startPrank(userA);
+    // remove liquidity should work when paused
+    lp.approve(address(pool), 1 ether);
+    uint256[2] memory min_amounts = [uint256(0), uint256(0)];
+    pool.remove_liquidity(1 ether, min_amounts);
+    vm.stopPrank();
   }
 }
