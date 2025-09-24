@@ -78,12 +78,12 @@ contract Moolah is
   /// if whitelist is set, only whitelisted addresses can supply, supply collateral, borrow
   mapping(Id => EnumerableSet.AddressSet) private whiteList;
 
+  /// default market fee rate
+  uint256 public defaultMarketFee;
+
   /// @inheritdoc IMoolahBase
   // fixed rate & fixed term brokers
   mapping(Id => address) public brokers;
-
-  /// default market fee rate
-  uint256 public defaultMarketFee;
 
   bytes32 public constant MANAGER = keccak256("MANAGER"); // manager role
   bytes32 public constant PAUSER = keccak256("PAUSER"); // pauser role
