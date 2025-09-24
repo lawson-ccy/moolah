@@ -81,7 +81,7 @@ contract Moolah is
   /// @inheritdoc IMoolahBase
   // fixed rate & fixed term brokers
   mapping(Id => address) public brokers;
-  
+
   /// default market fee rate
   uint256 public defaultMarketFee;
 
@@ -600,10 +600,7 @@ contract Moolah is
       }
       // check if the market has a broker assigned
       address broker = brokers[id];
-      if (
-        broker != address(0) && 
-        marketParams.collateralToken == IBrokerBase(broker).COLLATERAL_TOKEN()
-      ) {
+      if (broker != address(0) && marketParams.collateralToken == IBrokerBase(broker).COLLATERAL_TOKEN()) {
         IBrokerBase(broker).liquidate(id, borrower);
       }
     }
@@ -762,12 +759,11 @@ contract Moolah is
   function _getPrice(MarketParams memory marketParams, address user) public view returns (uint256) {
     address broker = brokers[marketParams.id()];
 
-    (
-      uint256 basePrice,
-      uint256 quotePrice, 
-      uint256 baseTokenDecimals,
-      uint256 quoteTokenDecimals
-    ) = PriceLib._getPrice(marketParams, user, broker);
+    (uint256 basePrice, uint256 quotePrice, uint256 baseTokenDecimals, uint256 quoteTokenDecimals) = PriceLib._getPrice(
+      marketParams,
+      user,
+      broker
+    );
 
     uint256 scaleFactor = 10 ** (36 + quoteTokenDecimals - baseTokenDecimals);
     return scaleFactor.mulDivDown(basePrice, quotePrice);

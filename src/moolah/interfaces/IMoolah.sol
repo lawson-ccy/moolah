@@ -335,7 +335,7 @@ interface IMoolahBase {
 
   /// @notice Set the default market fee for new markets.
   function setDefaultMarketFee(uint256 newFee) external;
-  
+
   /// @notice Set/Remove the market broker for the market `id`.
   function setMarketBroker(Id id, address broker, bool isAddition) external;
 }
