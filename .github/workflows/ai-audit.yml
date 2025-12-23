@@ -31,6 +31,8 @@ jobs:
         id: gen_diff
         run: |
           gh pr diff > pr.diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: cursor perform audit
         id: cursor_review
