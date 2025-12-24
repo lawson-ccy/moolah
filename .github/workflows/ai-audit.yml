@@ -27,11 +27,6 @@ jobs:
           # will not fail even error exists
           fail-on: none
 
-      - name: Setup GH CLI auth
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Get PR diff
         run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
         env:
