@@ -1,4 +1,4 @@
-name: AI Code Review
+name: Solidity PR Audit
 on:
   pull_request:
     types: [opened, synchronize, reopened]  # Run on new PRs, added commits, and reopened PRs:contentReference[oaicite:9]{index=9}
