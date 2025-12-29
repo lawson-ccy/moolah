@@ -1,201 +1,97 @@
-name: AI Audit
-
+name: AI Code Review
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
-
-permissions:
-  pull-requests: write
-  contents: read
-  issues: write
+    types: [opened, synchronize, reopened]  # Run on new PRs, added commits, and reopened PRs:contentReference[oaicite:9]{index=9}
 
 jobs:
-  security-review:
+  audit:
     runs-on: ubuntu-latest
-    # skip draft PR, save tokens
-    if: github.event.pull_request.draft == false
+    permissions:
+      pull-requests: write   # allow posting PR comments:contentReference[oaicite:10]{index=10}
+      issues: write
+
     steps:
-      - name: pull repo
+      - name: Checkout PR code
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Slither static analyse
-        uses: crytic/slither-action@v0.4.1
-        with:
-          # will not fail even error exists
-          fail-on: none
-
-      - name: Get PR diff
-        run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Cursor CLI
+      - name: Identify changed Solidity files
+        id: diff
         run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
-          
-      - name: Configure git identity
-        run: |
-          git config user.name "Cursor Agent"
-          git config user.email "cursoragent@cursor.com"
-      
-      - name: Perform automated code review
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          MODEL: gpt-5.1-codex-max-high
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
-        run: |
-          cursor-agent --force --model "$MODEL" --output-format=text --print 'You are operating in a GitHub Actions runner performing Solidity smart contract security review for a pull request. The gh CLI is available and authenticated via GH_TOKEN. You may comment on pull requests.
-          Context:
-          - Repo: ${{ github.repository }}
-          - PR Number: ${{ github.event.pull_request.number }}
-          - PR Head SHA: ${{ github.event.pull_request.head.sha }}
-          - PR Base SHA: ${{ github.event.pull_request.base.sha }}
-          - Blocking Review: ${{ env.BLOCKING_REVIEW }}
-          
-          Objectives:
-          1) Re-check existing review comments and reply resolved when addressed.
-          2) Review the current PR diff and flag only clear, high-severity Solidity/EVM issues (security + fund safety).
-          3) Leave very short inline comments (1-2 sentences) on changed lines only and a brief summary at the end.
-          
-          Procedure:
-          - Get existing comments: gh pr view --json comments
-          - Get diff: gh pr diff
-          - Get changed files with patches to compute inline positions:
-            gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate --jq ".[] | {filename,patch}"
-          - Compute exact inline anchors for each issue (file path + diff position). Comments MUST be placed inline on the changed line in the diff, not as top-level comments.
-          
-          Handling prior bot comments:
-          - Detect prior top-level "no issues" style comments authored by this bot (match bodies like: "✅ no issues", "No issues found", "LGTM").
-          - If CURRENT run finds issues and any prior "no issues" comments exist:
-            - Prefer to remove them to avoid confusion:
-              - Try deleting top-level issue comments via:
-                gh api -X DELETE repos/${{ github.repository }}/issues/comments/<comment_id>
-              - If deletion is not possible, minimize them via GraphQL (minimizeComment) or edit to prefix "[Superseded by new findings]".
-            - If neither delete nor minimize is possible, reply to that comment:
-              "⚠️ Superseded: issues were found in newer commits".
-          - If a previously reported issue appears fixed by nearby changes, reply inline:
-            "✅ This issue appears to be resolved by the recent changes".
-          
-          Scope: Solidity / EVM / DeFi security (changed lines ONLY)
-          Analyze ONLY for clear, high-impact issues likely to cause loss of funds, protocol insolvency, privilege abuse, or permanent lockups. Prioritize correctness and exploitability over style.
-          
-          High-severity checks (focus list):
-          🔒 Access control / authz
-          - Missing/incorrect onlyOwner/role checks, privilege escalation, unsafe admin functions.
-          - Incorrect msg.sender assumptions (tx.origin usage, meta-tx pitfalls).
-          
-          🔒 Reentrancy / external calls
-          - External call before state update, callbacks (ERC777 hooks), reentrancy via transferFrom/notify hooks.
-          - Unsafe use of call/value, missing reentrancy guard when needed.
-          
-          🔒 Arithmetic / accounting
-          - Share/asset accounting bugs, rounding direction errors, fee math mistakes, precision loss.
-          - Overflow/underflow on unchecked blocks, unsafe casting (uint256<->int256, smaller uint).
-          
-          🔒 Token interaction pitfalls
-          - Non-standard ERC20 (no return, false returns), missing SafeERC20.
-          - Approval front-run / allowance race; unsafe approve patterns.
-          - Assuming transfer returns true / ignoring return values.
-          - Fee-on-transfer / rebasing tokens breaking invariants.
-          
-          🔒 Price oracle / MEV / economic attacks (only if diff touches them)
-          - Stale prices, missing heartbeat checks, decimals mismatch.
-          - Manipulable spot price usage, TWAP misuse, sandwichable flows.
-          - Slippage checks missing in swaps/mints/redeems.
-          
-          🔒 Upgradeability / initialization
-          - Missing initializer/onlyInitializing, unprotected initialize, initializer callable twice.
-          - Storage layout hazards (new vars order), unsafe delegatecall patterns.
-          - UUPS/Transparent proxy admin mistakes.
-          
-          🔒 DoS / griefing / locks
-          - Unbounded loops over user-controlled arrays.
-          - Pull vs push payments issues, blocked withdrawals due to revert-on-transfer.
-          - Denial via revert in external call (e.g., sending ETH to contract without receive()).
-          
-          🔒 Signature / permit / replay
-          - Missing nonce, missing domain separator correctness, chainId replay risk.
-          - Using ecrecover without malleability checks, incorrect typed data hashing.
-          
-          🔒 Time / randomness assumptions
-          - Block timestamp manipulation for critical logic, insecure randomness.
-          
-          ⚠️ Logic / invariants
-          - Broken require conditions, inverted comparisons, missing state transitions.
-          - Incorrect event emission (especially for accounting / admin actions) if it impacts monitoring or off-chain safety.
-          
-          Inputs you may use:
-          - The PR diff (primary).
-          - Slither results are available in the repo workspace; if results.sarif or slither output indicates a concrete issue that matches changed code, you may reference it briefly, but still anchor comments to changed lines.
-          
-          Non-goals / avoid:
-          - Pure style/nits, naming, formatting, "best practices" that are not tied to a clear vulnerability.
-          - Speculation about unaffected files or untouched code.
-          - Duplicate feedback: skip if similar feedback already exists on or near the same lines.
-          
-          Commenting rules:
-          - Max 10 inline comments total; prioritize the most critical issues.
-          - One issue per comment; place on the exact changed line.
-          - All issue comments MUST be inline (anchored to a file and line/position in the PR diff).
-          - Natural tone, specific and actionable; do not mention being automated or your confidence level.
-          - Use emojis: 🚨 Critical 🔒 Security ⚠️ Logic ⚡ Gas/Perf ✅ Resolved ✨ Improvement
-          - Each comment should include: (a) what can go wrong, (b) the smallest safe fix suggestion.
-          
-          Submission:
-          - If there are NO issues to report and an existing top-level comment indicating "no issues" already exists, do NOT submit another comment.
-          - If there are NO issues to report and NO prior "no issues" comment exists, submit one brief summary comment noting no issues.
-          - If there ARE issues to report and a prior "no issues" comment exists, ensure that prior comment is deleted/minimized/marked as superseded before submitting the new review.
-          - If there ARE issues to report, submit ONE review containing ONLY inline comments plus an optional concise summary body. Use the GitHub Reviews API to ensure comments are inline:
-            - Build a JSON array of comments like:
-              [{ "path": "<file>", "position": <diff_position>, "body": "..." }]
-            - Submit via:
-              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews -f event=COMMENT -f body="$SUMMARY" -f comments="[$COMMENTS_JSON]"
-          - Do NOT use: gh pr review --approve or --request-changes
-          
-          Blocking behavior:
-          - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
-          - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
-          - Always set CRITICAL_ISSUES_FOUND at the end
-          '
-      - name: Check blocking review results
-        if: env.BLOCKING_REVIEW == 'true'
-        run: |
-          echo "Checking for critical issues..."
-          echo "CRITICAL_ISSUES_FOUND: ${CRITICAL_ISSUES_FOUND:-unset}"
-          if [ "${CRITICAL_ISSUES_FOUND:-false}" = "true" ]; then
-            echo "❌ Critical issues found and blocking review is enabled. Failing the workflow."
-            exit 1
+          git fetch origin ${{ github.base_ref }}
+          # List changed files between PR head and base branch
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > all_changed.txt
+          # Filter for .sol files outside test/ and scripts/
+          grep -E '\.sol$' all_changed.txt | grep -vE '^(test|scripts)/' > changed_sol.txt || true
+          count=$(wc -l < changed_sol.txt | xargs)
+          if [ "$count" -gt 0 ]; then
+            echo "solidity_changed=true" >> $GITHUB_OUTPUT
+            echo "files=$(paste -s -d',' changed_sol.txt)" >> $GITHUB_OUTPUT   # e.g., "contracts/MyContract.sol,contracts/Other.sol"
           else
-            echo "✅ No blocking issues found."
-          fi
-          
-      - name: consolidate audit result
-        run: |
-          echo "## AI Audit Result" > comment.md
-          cat cursor_output.md >> comment.md
-          echo -e "\n## Slither Static Analyse" >> comment.md
-          if [ -f results.sarif ]; then
-            jq -r '.runs[].results[] | "- [\(.check_id)] \(.message.text)"' results.sarif \
-              >> comment.md || true
+            echo "solidity_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Searching for existing review
+      - name: Install Slither
+        if: steps.diff.outputs.solidity_changed == 'true'
+        run: pip3 install slither-analyzer
+
+      - name: Run Slither analysis on changed contracts
+        if: steps.diff.outputs.solidity_changed == 'true'
+        id: slither
+        run: |
+          # Run Slither on the repo, focusing on diffs (between base and PR head)
+          slither --json slither-output.json --git-diff origin/${{ github.base_ref }} . || true
+          # (Optional) Parse Slither JSON to summarize findings for AI prompt
+          jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt || true
+
+      - name: Call OpenAI Codex for security analysis
+        if: steps.diff.outputs.solidity_changed == 'true'
+        id: ai
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Construct JSON payload for OpenAI Chat Completion API
+          cat > prompt.json <<'PROMPT'
+          {
+            "model": "gpt-4",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a senior smart contract security auditor (in the style of BailSec). You deeply analyze Solidity pull requests and write clear, professional security reports."
+              },
+              {
+                "role": "user",
+                "content": "The following is a Solidity code diff from a GitHub pull request. Please review the changes for any potential security vulnerabilities, logical flaws, gas inefficiencies, or deviation from best practices.\n\nAlso included are the Slither static analysis results (which may contain duplicated or low-confidence findings).\n\nYour task:\n\n1. Carefully analyze the PR diff and Slither findings together.\n2. Identify and explain any **security vulnerabilities**, **incorrect logic**, or **critical design flaws**.\n3. Rate each issue with one of the following severities: `Critical`, `High`, `Medium`, `Low`, `Informational`.\n4. For each issue, specify:\n   - Affected contract name\n   - A concise issue title\n   - A short explanation of the problem\n   - A concrete recommendation to fix it\n\n5. If there are **no major issues**, you must still return the table with one `Informational` row explaining \"No significant issues found\".\n\n6. Format the output as a Markdown table:\n\n| Severity | Contract | Issue | Recommendation |\n|----------|----------|-------|----------------|\n| High     | MyToken  | Missing access control in `mint()` | Add `onlyOwner` or proper modifier to restrict access |\n| ...      | ...      | ...   | ...            |\n\n---\n\n### PR DIFF:\n```\n<PR_DIFF_PLACEHOLDER>\n```\n\n### SLITHER FINDINGS:\n```\n<SLITHER_FINDINGS_PLACEHOLDER>\n```"
+              }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1500
+          }
+          PROMPT
+
+          # Call OpenAI API
+          curl -sS https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d @prompt.json -o response.json
+
+          # Extract the assistant's reply (the audit report table) and save to file
+          jq -r '.choices[0].message.content' response.json > audit_report.md
+
+      - name: Find previous audit comment
         id: find_comment
         uses: peter-evans/find-comment@v3
         with:
           issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: 'AI Audit Result'
+          comment-author: github-actions[bot]
+          body-includes: "<!-- solidity-audit-report -->"
 
-      - name: Create or update audit result
+      - name: Create/Update audit comment
         uses: peter-evans/create-or-update-comment@v5
         with:
-          comment-id: ${{ steps.find_comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
-          body-path: comment.md
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          body-path: audit_report.md
           edit-mode: replace
