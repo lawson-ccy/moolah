@@ -44,7 +44,12 @@ jobs:
           # Run Slither on the repo, focusing on diffs (between base and PR head)
           slither --json slither-output.json --git-diff origin/${{ github.base_ref }} . || true
           # (Optional) Parse Slither JSON to summarize findings for AI prompt
-          jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt || true
+          if [ -f slither-output.json ]; then
+            jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt
+          else
+            echo "No slither output." > slither-findings.txt
+          fi
+
 
       - name: Call OpenAI Codex for security analysis
         if: steps.diff.outputs.solidity_changed == 'true'
