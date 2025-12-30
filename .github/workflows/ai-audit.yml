@@ -39,8 +39,7 @@ jobs:
         if: steps.diff.outputs.solidity_changed == 'true'
         id: slither
         run: |
-          slither_files=$(cat changed_sol.txt | xargs)
-          slither $slither_files --json slither-output.json || true
+          slither . --json slither-output.json --exclude-dependencies --exclude-informational || true
           if [ -f slither-output.json ]; then
             jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt
           else
