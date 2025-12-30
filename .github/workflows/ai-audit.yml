@@ -1,0 +1,102 @@
+name: Solidity PR Audit
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Identify changed Solidity files
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > all_changed.txt
+          grep -E '\.sol$' all_changed.txt | grep -vE '^(test|scripts)/' > changed_sol.txt || true
+          count=$(wc -l < changed_sol.txt | xargs)
+          if [ "$count" -gt 0 ]; then
+            echo "solidity_changed=true" >> $GITHUB_OUTPUT
+            echo "files=$(paste -s -d',' changed_sol.txt)" >> $GITHUB_OUTPUT   # e.g., "contracts/MyContract.sol,contracts/Other.sol"
+          else
+            echo "solidity_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Slither
+        if: steps.diff.outputs.solidity_changed == 'true'
+        run: pip3 install slither-analyzer
+
+      - name: Run Slither analysis on changed contracts
+        if: steps.diff.outputs.solidity_changed == 'true'
+        id: slither
+        run: |
+          slither . \
+            --exclude-dependencies \
+            --exclude-informational \
+            --json slither-output.json || true
+
+          if jq -e '.results.detections != null and .results.detections | length > 0' slither-output.json > /dev/null; then
+            jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt
+          else
+            echo "No Slither issues found." > slither-findings.txt
+          fi
+
+
+      - name: Call OpenAI Codex for security analysis
+        if: steps.diff.outputs.solidity_changed == 'true'
+        id: ai
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cat > prompt.json <<'PROMPT'
+          {
+            "model": "gpt-4",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a senior smart contract security auditor (in the style of BailSec). You deeply analyze Solidity pull requests and write clear, professional security reports."
+              },
+              {
+                "role": "user",
+                "content": "The following is a Solidity code diff from a GitHub pull request. Please review the changes for any potential security vulnerabilities, logical flaws, gas inefficiencies, or deviation from best practices.\n\nAlso included are the Slither static analysis results (which may contain duplicated or low-confidence findings).\n\nYour task:\n\n1. Carefully analyze the PR diff and Slither findings together.\n2. Identify and explain any **security vulnerabilities**, **incorrect logic**, or **critical design flaws**.\n3. Rate each issue with one of the following severities: `Critical`, `High`, `Medium`, `Low`, `Informational`.\n4. For each issue, specify:\n   - Affected contract name\n   - A concise issue title\n   - A short explanation of the problem\n   - A concrete recommendation to fix it\n\n5. If there are **no major issues**, you must still return the table with one `Informational` row explaining \"No significant issues found\".\n\n6. Format the output as a Markdown table:\n\n| Severity | Contract | Issue | Recommendation |\n|----------|----------|-------|----------------|\n| High     | MyToken  | Missing access control in `mint()` | Add `onlyOwner` or proper modifier to restrict access |\n| ...      | ...      | ...   | ...            |\n\n---\n\n### PR DIFF:\n```\n<PR_DIFF_PLACEHOLDER>\n```\n\n### SLITHER FINDINGS:\n```\n<SLITHER_FINDINGS_PLACEHOLDER>\n```"
+              }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1500
+          }
+          PROMPT
+
+          curl -sS https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d @prompt.json -o response.json
+
+          jq -r '.choices[0].message.content' response.json > audit_report.md
+
+      - name: Find previous audit comment
+        id: find_comment
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: "<!-- solidity-audit-report -->"
+
+      - name: Create/Update audit comment
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          body-path: audit_report.md
+          edit-mode: replace
