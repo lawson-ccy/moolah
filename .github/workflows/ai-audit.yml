@@ -42,11 +42,15 @@ jobs:
         if: steps.diff.outputs.solidity_changed == 'true'
         id: slither
         run: |
-          slither . --json slither-output.json --exclude-dependencies --exclude-informational || true
-          if [ -f slither-output.json ]; then
+          slither . \
+            --exclude-dependencies \
+            --exclude-informational \
+            --json slither-output.json || true
+
+          if jq -e '.results.detections != null and .results.detections | length > 0' slither-output.json > /dev/null; then
             jq -r '.results.detections[] | "- Issue: \(.check) in \(.elements[0].source_mapping.filename) - \(.description)"' slither-output.json > slither-findings.txt
           else
-            echo "No slither output." > slither-findings.txt
+            echo "No Slither issues found." > slither-findings.txt
           fi
 
 
