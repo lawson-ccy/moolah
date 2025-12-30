@@ -31,6 +31,9 @@ jobs:
             echo "solidity_changed=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
       - name: Install Slither
         if: steps.diff.outputs.solidity_changed == 'true'
         run: pip3 install slither-analyzer
